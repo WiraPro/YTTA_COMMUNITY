@@ -41,7 +41,7 @@ const client = new Client({
 });
 
 // ─── Penyimpanan Data (In-Memory) ───
-const guildConfigs = new Map();   // { announcementChannelId, logChannelId, reactionRoles }
+const guildConfigs = new Map();   // { announcementChannelId, welcomeChannelId, goodbyeChannelId, logChannelId }
 const activeTrivia  = new Map();  // userId -> { question, answer, timeout }
 const userPoints    = new Map();  // userId -> points
 const reactionRoleMessages = new Map(); // messageId -> { roleId, emoji }
@@ -86,7 +86,12 @@ const BALL_ANSWERS = [
 // ─── Fungsi Helper ───
 function getConfig(guildId) {
   if (!guildConfigs.has(guildId)) {
-    guildConfigs.set(guildId, { announcementChannelId: null, logChannelId: null });
+    guildConfigs.set(guildId, {
+      announcementChannelId: null,
+      welcomeChannelId: null,
+      goodbyeChannelId: null,
+      logChannelId: null,
+    });
   }
   return guildConfigs.get(guildId);
 }
@@ -126,8 +131,20 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
+    .setName('setup-welcome')
+    .setDescription('👋 Set channel untuk pesan selamat datang (member masuk)')
+    .addChannelOption(o => o.setName('channel').setDescription('Channel welcome').setRequired(true).addChannelTypes(ChannelType.GuildText))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
+    .setName('setup-goodbye')
+    .setDescription('👋 Set channel untuk pesan perpisahan (member keluar)')
+    .addChannelOption(o => o.setName('channel').setDescription('Channel goodbye').setRequired(true).addChannelTypes(ChannelType.GuildText))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  new SlashCommandBuilder()
     .setName('setup-log')
-    .setDescription('⚙️ Set channel untuk log aktivitas bot')
+    .setDescription('⚙️ Set channel untuk log aktivitas bot (moderasi, dll)')
     .addChannelOption(o => o.setName('channel').setDescription('Channel log').setRequired(true).addChannelTypes(ChannelType.GuildText))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
@@ -292,18 +309,30 @@ client.once(Events.ClientReady, async () => {
 // ─── Event: Member Join ───
 client.on(Events.GuildMemberAdd, async (member) => {
   const config = getConfig(member.guild.id);
-  
-  // Welcome message di system channel
-  const sysChannel = member.guild.systemChannel;
-  if (sysChannel) {
+
+  // Kirim ke welcome channel jika sudah diset, fallback ke system channel
+  const welcomeCh = config.welcomeChannelId
+    ? member.guild.channels.cache.get(config.welcomeChannelId)
+    : member.guild.systemChannel;
+
+  if (welcomeCh) {
     const embed = new EmbedBuilder()
       .setTitle('🎉 Selamat Datang!')
-      .setDescription(`Halo ${member}, selamat datang di **YTTA Community**! 🎊\n\nKamu adalah member ke-**${member.guild.memberCount}**!\nSilakan baca rules dan ambil role kamu ya~`)
-      .setColor(COLORS.ytta)
+      .setDescription(
+        `Halo ${member}, selamat datang di **YTTA Community**! 🎊\n\n` +
+        `Kamu adalah member ke-**${member.guild.memberCount}**!\n` +
+        `Silakan baca rules dan ambil role kamu ya~`
+      )
+      .setColor(COLORS.success)
       .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+      .addFields(
+        { name: '👤 Username', value: member.user.tag, inline: true },
+        { name: '🆔 ID', value: member.id, inline: true },
+        { name: '📅 Akun Dibuat', value: `<t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`, inline: true },
+      )
       .setTimestamp()
       .setFooter({ text: 'YTTA Community' });
-    sysChannel.send({ embeds: [embed] });
+    welcomeCh.send({ embeds: [embed] }).catch(() => {});
   }
 
   await sendLog(member.guild, `📥 **${member.user.tag}** bergabung ke server. (Total: ${member.guild.memberCount})`);
@@ -311,6 +340,31 @@ client.on(Events.GuildMemberAdd, async (member) => {
 
 // ─── Event: Member Leave ───
 client.on(Events.GuildMemberRemove, async (member) => {
+  const config = getConfig(member.guild.id);
+
+  const goodbyeCh = config.goodbyeChannelId
+    ? member.guild.channels.cache.get(config.goodbyeChannelId)
+    : null;
+
+  if (goodbyeCh) {
+    const embed = new EmbedBuilder()
+      .setTitle('👋 Sampai Jumpa!')
+      .setDescription(
+        `**${member.user.tag}** telah meninggalkan server.\n\n` +
+        `Semoga kita bisa bertemu lagi! 🙏`
+      )
+      .setColor(COLORS.danger)
+      .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+      .addFields(
+        { name: '👤 Username', value: member.user.tag, inline: true },
+        { name: '👥 Member Tersisa', value: `${member.guild.memberCount}`, inline: true },
+        { name: '📅 Bergabung', value: member.joinedTimestamp ? `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` : 'Tidak diketahui', inline: true },
+      )
+      .setTimestamp()
+      .setFooter({ text: 'YTTA Community' });
+    goodbyeCh.send({ embeds: [embed] }).catch(() => {});
+  }
+
   await sendLog(member.guild, `📤 **${member.user.tag}** meninggalkan server. (Total: ${member.guild.memberCount})`);
 });
 
@@ -378,6 +432,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
         getConfig(guild.id).announcementChannelId = ch.id;
         await interaction.reply({
           embeds: [makeEmbed('✅ Setup Berhasil!', `Channel announcement telah diset ke ${ch}!\nGunakan \`/announce\` untuk mengirim pengumuman.`, COLORS.success)],
+          ephemeral: true
+        });
+        break;
+      }
+
+      // ════════════════════════
+      //   SETUP WELCOME
+      // ════════════════════════
+      case 'setup-welcome': {
+        const ch = options.getChannel('channel');
+        getConfig(guild.id).welcomeChannelId = ch.id;
+        await interaction.reply({
+          embeds: [makeEmbed('✅ Setup Welcome Berhasil!',
+            `Channel untuk pesan **selamat datang** telah diset ke ${ch}!\n\nSetiap member baru yang masuk akan disambut di channel ini. 🎉`,
+            COLORS.success)],
+          ephemeral: true
+        });
+        break;
+      }
+
+      // ════════════════════════
+      //   SETUP GOODBYE
+      // ════════════════════════
+      case 'setup-goodbye': {
+        const ch = options.getChannel('channel');
+        getConfig(guild.id).goodbyeChannelId = ch.id;
+        await interaction.reply({
+          embeds: [makeEmbed('✅ Setup Goodbye Berhasil!',
+            `Channel untuk pesan **perpisahan** telah diset ke ${ch}!\n\nSetiap member yang keluar akan dikirim pesan di channel ini. 👋`,
+            COLORS.success)],
           ephemeral: true
         });
         break;
@@ -798,7 +882,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               name: '⚙️ Admin (perlu permission)',
               value: [
                 '`/setup-announcement` — Set channel announcement',
-                '`/setup-log` — Set channel log aktivitas',
+                '`/setup-welcome` — Set channel selamat datang (member masuk)',
+                '`/setup-goodbye` — Set channel perpisahan (member keluar)',
+                '`/setup-log` — Set channel log aktivitas bot',
                 '`/announce` — Kirim pengumuman resmi',
                 '`/setup-roles` — Buat reaction role',
               ].join('\n')
